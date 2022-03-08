@@ -171,7 +171,7 @@ namespace Rock.Reporting.DataSelect.Person
             var familyGroupMembers = new GroupMemberService( context ).Queryable()
                 .Where( m => m.Group.GroupType.Guid == familyGuid );
 
-            // This returns an Enumerable of ParentInfo per row. The Grid then uses GetGridField to convert the list into Parents' Phone Numbers with their nicknames.
+            // This returns an Enumerable of a string per row. The Grid then uses ListDelimitedField to convert the list into Parents' Phone Numbers and NickNames.
             var personParentsPhoneQuery = new PersonService( context ).Queryable()
                 .Select( p => familyGroupMembers.Where( s => s.PersonId == p.Id && s.GroupRole.Guid == childGuid )
                     .SelectMany( m => m.Group.Members )
