@@ -103,16 +103,6 @@ namespace Rock.Reporting.DataSelect.Person
         }
 
         /// <summary>
-        /// little class so that we only need to fetch the columns that we need from Person
-        /// </summary>
-        private class ParentInfo
-        {
-            public string NickName { get; set; }
-
-            public PhoneNumber Phone { get; set; }
-        }
-
-        /// <summary>
         /// Gets the default column header text.
         /// </summary>
         /// <value>
