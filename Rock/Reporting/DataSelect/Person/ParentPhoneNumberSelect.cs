@@ -81,7 +81,6 @@ namespace Rock.Reporting.DataSelect.Person
             }
         }
 
-        /// <summary>
         /// Gets the type of the column field.
         /// </summary>
         /// <value>
@@ -89,7 +88,7 @@ namespace Rock.Reporting.DataSelect.Person
         /// </value>
         public override Type ColumnFieldType
         {
-            get { return typeof( IEnumerable<ParentInfo> ); }
+            get { return typeof( IEnumerable<string> ); }
         }
 
         /// <summary>
@@ -100,28 +99,7 @@ namespace Rock.Reporting.DataSelect.Person
         /// <returns></returns>
         public override System.Web.UI.WebControls.DataControlField GetGridField( Type entityType, string selection )
         {
-            var callbackField = new CallbackField();
-            callbackField.OnFormatDataValue += ( sender, e ) =>
-            {
-                if ( e.DataValue is IEnumerable<ParentInfo> parentInfoList )
-                {
-                    var formattedList = new List<string>();
-                    foreach ( var parentInfo in parentInfoList )
-                    {
-                        // Combine phone number and parent nickname.
-                        var formattedPerson = parentInfo.Phone + " - " + parentInfo.NickName;
-                        formattedList.Add( formattedPerson );
-                    }
-
-                    e.FormattedValue = formattedList.AsDelimited( ", " );
-                }
-                else
-                {
-                    e.FormattedValue = string.Empty;
-                }
-            };
-
-            return callbackField;
+            return new ListDelimitedField();
         }
 
         /// <summary>
@@ -211,11 +189,8 @@ namespace Rock.Reporting.DataSelect.Person
                     .OrderBy( m => m.Group.Members.FirstOrDefault( x => x.PersonId == p.Id ).GroupOrder ?? int.MaxValue )
                     .Select( m => m.Person )
                     .Where( m => m.PhoneNumbers.Count( t => t.NumberTypeValueId == phoneNumberTypeValueId ) != 0 )
-                    .Select( m => new ParentInfo
-                    {
-                        Phone = m.PhoneNumbers.FirstOrDefault( t => t.NumberTypeValueId == phoneNumberTypeValueId ),
-                        NickName = m.NickName
-                    } ).AsEnumerable() );
+                    .Select( m =>
+                    m.PhoneNumbers.FirstOrDefault( t => t.NumberTypeValueId == phoneNumberTypeValueId ).NumberFormatted + " - " + m.NickName ).AsEnumerable() );
 
             var selectNumbersExpression = SelectExpressionExtractor.Extract( personParentsPhoneQuery, entityIdProperty, "p" );
 
