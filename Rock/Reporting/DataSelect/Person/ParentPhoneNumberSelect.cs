@@ -81,6 +81,7 @@ namespace Rock.Reporting.DataSelect.Person
             }
         }
 
+        /// <summary>
         /// Gets the type of the column field.
         /// </summary>
         /// <value>
