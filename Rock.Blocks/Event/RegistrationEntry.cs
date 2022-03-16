@@ -510,51 +510,10 @@ namespace Rock.Blocks.Event
             History.EvaluateChange( registrationChanges, "Discount Amount", context.Registration.DiscountAmount, discountAmount );
             context.Registration.DiscountAmount = discountAmount;
 
-            // If the registrar person record does not exist, find or create that record
-            var personService = new PersonService( rockContext );
-
+            // If the registrar person record does not exist, try to find the record.
             if ( registrar == null )
             {
-                /**
-                 * 1/26/2022 - DSH
-                 * 
-                 * Logic is as follows. If we have a logged in person and the name has
-                 * not been changed, then just use the current person as the registrar.
-                 * 
-                 * Otherwise (no logged in person or the name was changed), perform a
-                 * standard person match search to try to find an existing person.
-                 */
-                bool currentPersonNamesMatch = false;
-
-                if ( currentPerson != null )
-                {
-                    var isFirstNameSame = currentPerson.NickName.Trim().Equals( context.Registration.FirstName, StringComparison.OrdinalIgnoreCase )
-                        || currentPerson.FirstName.Trim().Equals( context.Registration.FirstName, StringComparison.OrdinalIgnoreCase );
-                    var isLastNameSame = currentPerson.LastName.Trim().Equals( context.Registration.LastName, StringComparison.OrdinalIgnoreCase );
-
-                    currentPersonNamesMatch = isFirstNameSame && isLastNameSame;
-                }
-
-                if ( currentPersonNamesMatch )
-                {
-                    registrar = currentPerson;
-                    context.Registration.PersonAliasId = currentPerson.PrimaryAliasId;
-                }
-                else
-                {
-                    registrar = personService.FindPerson( context.Registration.FirstName, context.Registration.LastName, context.Registration.ConfirmationEmail, true );
-
-                    if ( registrar != null )
-                    {
-                        context.Registration.PersonAliasId = registrar.PrimaryAliasId;
-                    }
-                    else
-                    {
-                        registrar = null;
-                        context.Registration.PersonAlias = null;
-                        context.Registration.PersonAliasId = null;
-                    }
-                }
+                registrar = GetExistingRegistrarPerson( context, currentPerson, rockContext );
             }
 
             // Load some attribute values about family roles and statuses
@@ -657,29 +616,7 @@ namespace Rock.Blocks.Event
             }
 
             // If the Registration Instance linkage specified a group, load it now
-            var groupId = PageParameter( PageParameterKey.GroupId ).AsIntegerOrNull();
-            var registrationSlug = PageParameter( PageParameterKey.Slug );
-
-            if ( !groupId.HasValue && !registrationSlug.IsNullOrWhiteSpace() )
-            {
-                var dateTime = RockDateTime.Now;
-                var linkage = new EventItemOccurrenceGroupMapService( rockContext )
-                    .Queryable().AsNoTracking()
-                    .Where( l =>
-                        l.UrlSlug == registrationSlug &&
-                        l.RegistrationInstance != null &&
-                        l.RegistrationInstance.IsActive &&
-                        l.RegistrationInstance.RegistrationTemplate != null &&
-                        l.RegistrationInstance.RegistrationTemplate.IsActive &&
-                        ( !l.RegistrationInstance.StartDateTime.HasValue || l.RegistrationInstance.StartDateTime <= dateTime ) &&
-                        ( !l.RegistrationInstance.EndDateTime.HasValue || l.RegistrationInstance.EndDateTime > dateTime ) )
-                    .FirstOrDefault();
-
-                if ( linkage != null )
-                {
-                    groupId = linkage.GroupId;
-                }
-            }
+            var groupId = GetRegistrationGroupId( rockContext );
 
             Group group = null;
 
@@ -805,6 +742,95 @@ namespace Rock.Blocks.Event
             }
 
             return context.Registration;
+        }
+
+        /// <summary>
+        /// Gets the existing registrar person from the registration.
+        /// </summary>
+        /// <param name="context">The registration context.</param>
+        /// <param name="currentPerson">The current person that is logged in.</param>
+        /// <param name="rockContext">The rock context.</param>
+        /// <returns>The <see cref="Person"/> that should be used as the registrant or <c>null</c> if unknown.</returns>
+        private Person GetExistingRegistrarPerson( RegistrationContext context, Person currentPerson, RockContext rockContext )
+        {
+            /**
+             * 1/26/2022 - DSH
+             * 
+             * Logic is as follows. If we have a logged in person and the name has
+             * not been changed, then just use the current person as the registrar.
+             * 
+             * Otherwise (no logged in person or the name was changed), perform a
+             * standard person match search to try to find an existing person.
+             */
+            bool currentPersonNamesMatch = false;
+            Person registrar;
+
+            if ( currentPerson != null )
+            {
+                var isFirstNameSame = currentPerson.NickName.Trim().Equals( context.Registration.FirstName, StringComparison.OrdinalIgnoreCase )
+                    || currentPerson.FirstName.Trim().Equals( context.Registration.FirstName, StringComparison.OrdinalIgnoreCase );
+                var isLastNameSame = currentPerson.LastName.Trim().Equals( context.Registration.LastName, StringComparison.OrdinalIgnoreCase );
+
+                currentPersonNamesMatch = isFirstNameSame && isLastNameSame;
+            }
+
+            if ( currentPersonNamesMatch )
+            {
+                registrar = currentPerson;
+                context.Registration.PersonAliasId = currentPerson.PrimaryAliasId;
+            }
+            else
+            {
+                var personService = new PersonService( rockContext );
+                registrar = personService.FindPerson( context.Registration.FirstName, context.Registration.LastName, context.Registration.ConfirmationEmail, true );
+
+                if ( registrar != null )
+                {
+                    context.Registration.PersonAliasId = registrar.PrimaryAliasId;
+                }
+                else
+                {
+                    registrar = null;
+                    context.Registration.PersonAlias = null;
+                    context.Registration.PersonAliasId = null;
+                }
+            }
+
+            return registrar;
+        }
+
+        /// <summary>
+        /// Gets the registration group identifier.
+        /// </summary>
+        /// <param name="rockContext">The rock context.</param>
+        /// <returns>The <see cref="Group"/> identifier or <c>null</c> if one is not available.</returns>
+        private int? GetRegistrationGroupId( RockContext rockContext )
+        {
+            var groupId = PageParameter( PageParameterKey.GroupId ).AsIntegerOrNull();
+            var registrationSlug = PageParameter( PageParameterKey.Slug );
+
+            if ( !groupId.HasValue && !registrationSlug.IsNullOrWhiteSpace() )
+            {
+                var dateTime = RockDateTime.Now;
+                var linkage = new EventItemOccurrenceGroupMapService( rockContext )
+                    .Queryable().AsNoTracking()
+                    .Where( l =>
+                        l.UrlSlug == registrationSlug &&
+                        l.RegistrationInstance != null &&
+                        l.RegistrationInstance.IsActive &&
+                        l.RegistrationInstance.RegistrationTemplate != null &&
+                        l.RegistrationInstance.RegistrationTemplate.IsActive &&
+                        ( !l.RegistrationInstance.StartDateTime.HasValue || l.RegistrationInstance.StartDateTime <= dateTime ) &&
+                        ( !l.RegistrationInstance.EndDateTime.HasValue || l.RegistrationInstance.EndDateTime > dateTime ) )
+                    .FirstOrDefault();
+
+                if ( linkage != null )
+                {
+                    groupId = linkage.GroupId;
+                }
+            }
+
+            return groupId;
         }
 
         /// <summary>
@@ -1253,40 +1279,20 @@ namespace Rock.Blocks.Event
         }
 
         /// <summary>
-        /// Upserts the registrant.
+        /// Gets an existing person if possible, otherwise creates a new Person object
+        /// which can be later saved to the database.
         /// </summary>
-        /// <param name="rockContext">The rock context.</param>
-        /// <param name="context">The context.</param>
-        /// <param name="registrar">The registrar.</param>
-        /// <param name="registrarFamilyGuid">The registrar family unique identifier.</param>
+        /// <param name="context">The registration context.</param>
         /// <param name="registrantInfo">The registrant information.</param>
-        /// <param name="index">The index.</param>
-        /// <param name="multipleFamilyGroupIds">The multiple family group ids.</param>
-        /// <param name="singleFamilyId">The single family identifier.</param>
-        /// <param name="isWaitlist">if set to <c>true</c> [is waitlist].</param>
-        private void UpsertRegistrant(
-            RockContext rockContext,
-            RegistrationContext context,
-            Person registrar,
-            Guid registrarFamilyGuid,
-            ViewModel.Blocks.Event.RegistrationEntry.RegistrantInfo registrantInfo,
-            int index,
-            Dictionary<Guid, int> multipleFamilyGroupIds,
-            ref int? singleFamilyId,
-            bool isWaitlist )
+        /// <param name="registrar">The registrar person that is performing the registering.</param>
+        /// <param name="registrarFamilyGuid">The registrar family unique identifier.</param>
+        /// <param name="rockContext">The rock context for any database lookups.</param>
+        /// <returns>A tuple that contains the <see cref="Person"/> object and the optional <see cref="RegistrationRegistrant"/> object.</returns>
+        private (Person person, RegistrationRegistrant registrant) GetExistingOrCreatePerson( RegistrationContext context, ViewModel.Blocks.Event.RegistrationEntry.RegistrantInfo registrantInfo, Person registrar, Guid registrarFamilyGuid, RockContext rockContext )
         {
-            // Force waitlist if specified by param, but allow waitlist if requested
-            isWaitlist |= ( context.RegistrationSettings.IsWaitListEnabled && registrantInfo.IsOnWaitList );
-
-            var personService = new PersonService( rockContext );
-            var registrationInstanceService = new RegistrationInstanceService( rockContext );
-            var registrantService = new RegistrationRegistrantService( rockContext );
-
-            var registrantChanges = new History.HistoryChangeList();
-            var personChanges = new History.HistoryChangeList();
-
             RegistrationRegistrant registrant = null;
             Person person = null;
+            var personService = new PersonService( rockContext );
 
             var firstName = GetPersonFieldValue( context.RegistrationSettings, RegistrationPersonFieldType.FirstName, registrantInfo.FieldValues ).ToStringSafe();
             var lastName = GetPersonFieldValue( context.RegistrationSettings, RegistrationPersonFieldType.LastName, registrantInfo.FieldValues ).ToStringSafe();
@@ -1363,21 +1369,11 @@ namespace Rock.Blocks.Event
                 }
             }
 
-            var dvcConnectionStatus = DefinedValueCache.Get( GetAttributeValue( AttributeKey.ConnectionStatus ).AsGuid() );
-            var dvcRecordStatus = DefinedValueCache.Get( GetAttributeValue( AttributeKey.RecordStatus ).AsGuid() );
-
-            var familyGroupType = GroupTypeCache.Get( Rock.SystemGuid.GroupType.GROUPTYPE_FAMILY );
-            var adultRoleId = familyGroupType.Roles
-                .Where( r => r.Guid.Equals( Rock.SystemGuid.GroupRole.GROUPROLE_FAMILY_MEMBER_ADULT.AsGuid() ) )
-                .Select( r => r.Id )
-                .FirstOrDefault();
-            var childRoleId = familyGroupType.Roles
-                .Where( r => r.Guid.Equals( Rock.SystemGuid.GroupRole.GROUPROLE_FAMILY_MEMBER_CHILD.AsGuid() ) )
-                .Select( r => r.Id )
-                .FirstOrDefault();
-
             if ( person == null )
             {
+                var dvcConnectionStatus = DefinedValueCache.Get( GetAttributeValue( AttributeKey.ConnectionStatus ).AsGuid() );
+                var dvcRecordStatus = DefinedValueCache.Get( GetAttributeValue( AttributeKey.RecordStatus ).AsGuid() );
+
                 // If a match was not found, create a new person
                 person = new Person();
                 person.FirstName = firstName;
@@ -1398,16 +1394,31 @@ namespace Rock.Blocks.Event
                 }
             }
 
+            return (person, registrant);
+        }
+
+        /// <summary>
+        /// Updates the person object from information provided in the registrant.
+        /// This does not perform the SaveChanges() call, so all changes are made
+        /// only to the in-memory object.
+        /// </summary>
+        /// <param name="person">The person to update.</param>
+        /// <param name="registrantInfo">The registrant information.</param>
+        /// <param name="personChanges">The person history changes that were made.</param>
+        /// <param name="settings">The registration settings.</param>
+        /// <returns>A tuple that contains the <see cref="Campus"/> identifier and the <see cref="Location"/> object if either were found.</returns>
+        private (int? campusId, Location location) UpdatePersonFromRegistrant( Person person, ViewModel.Blocks.Event.RegistrationEntry.RegistrantInfo registrantInfo, History.HistoryChangeList personChanges, RegistrationSettings settings )
+        {
             Location location = null;
-            var campusId = PageParameter( PageParameterKey.CampusId ).AsIntegerOrNull();
+            int? campusId = null;
 
             // Set any of the template's person fields
-            foreach ( var field in context.RegistrationSettings.Forms
+            foreach ( var field in settings.Forms
                 .SelectMany( f => f.Fields
                     .Where( t => t.FieldSource == RegistrationFieldSource.PersonField ) ) )
             {
                 // Find the registrant's value
-                var fieldValue = GetPersonFieldValue( context.RegistrationSettings, field.PersonFieldType, registrantInfo.FieldValues );
+                var fieldValue = GetPersonFieldValue( settings, field.PersonFieldType, registrantInfo.FieldValues );
 
                 if ( fieldValue != null )
                 {
@@ -1417,7 +1428,7 @@ namespace Rock.Blocks.Event
                             var campusGuid = fieldValue.ToString().AsGuidOrNull();
                             if ( campusGuid.HasValue )
                             {
-                                campusId = CampusCache.Get( campusGuid.Value )?.Id ?? campusId;
+                                campusId = CampusCache.Get( campusGuid.Value )?.Id;
                             }
                             break;
 
@@ -1522,18 +1533,29 @@ namespace Rock.Blocks.Event
                 }
             }
 
-            // Save the person ( and family if needed )
-            SavePerson( rockContext, context.RegistrationSettings, person, registrantInfo.FamilyGuid ?? Guid.NewGuid(), campusId, location, adultRoleId, childRoleId, multipleFamilyGroupIds, ref singleFamilyId );
+            return (campusId, location);
+        }
 
-            // Load the person's attributes
-            person.LoadAttributes();
-
-            // Set any of the template's person attribute fields
-            foreach ( var field in context.RegistrationSettings.Forms
+        /// <summary>
+        /// Updates the person attributes from the information contained in the
+        /// registrant information.
+        /// </summary>
+        /// <param name="person">The person object to be updated.</param>
+        /// <param name="personChanges">The person history changes that were made.</param>
+        /// <param name="registrantInfo">The registrant information.</param>
+        /// <param name="settings">The registration settings.</param>
+        /// <returns><c>true</c> if any attributes were modified, <c>false</c> otherwise.</returns>
+        private bool UpdatePersonAttributes( Person person, History.HistoryChangeList personChanges, ViewModel.Blocks.Event.RegistrationEntry.RegistrantInfo registrantInfo, RegistrationSettings settings )
+        {
+            bool isChanged = false;
+            var personAttributes = settings.Forms
                 .SelectMany( f => f.Fields
                     .Where( t =>
                         t.FieldSource == RegistrationFieldSource.PersonAttribute &&
-                        t.AttributeId.HasValue ) ) )
+                        t.AttributeId.HasValue ) );
+
+            // Set any of the template's person attribute fields
+            foreach ( var field in personAttributes )
             {
                 // Find the registrant's value
                 var fieldValue = registrantInfo.FieldValues.GetValueOrNull( field.Guid );
@@ -1544,19 +1566,8 @@ namespace Rock.Blocks.Event
                     if ( attribute != null )
                     {
                         string originalValue = person.GetAttributeValue( attribute.Key );
-                        string newValue = fieldValue.ToString();
-                        person.SetAttributeValue( attribute.Key, fieldValue.ToString() );
-
-                        // DateTime values must be stored in ISO8601 format as http://www.rockrms.com/Rock/Developer/BookContent/16/16#datetimeformatting
-                        if ( attribute.FieldType.Guid.Equals( Rock.SystemGuid.FieldType.DATE.AsGuid() ) ||
-                            attribute.FieldType.Guid.Equals( Rock.SystemGuid.FieldType.DATE_TIME.AsGuid() ) )
-                        {
-                            DateTime aDateTime;
-                            if ( DateTime.TryParse( newValue, out aDateTime ) )
-                            {
-                                newValue = aDateTime.ToString( "o" );
-                            }
-                        }
+                        string newValue = PublicAttributeHelper.GetPrivateValue( attribute, fieldValue.ToString() );
+                        person.SetAttributeValue( attribute.Key, newValue );
 
                         if ( ( originalValue ?? string.Empty ).Trim() != ( newValue ?? string.Empty ).Trim() )
                         {
@@ -1572,11 +1583,76 @@ namespace Rock.Blocks.Event
                                 formattedNewValue = attribute.FieldType.Field.GetTextValue( newValue, attribute.ConfigurationValues );
                             }
 
-                            Helper.SaveAttributeValue( person, attribute, newValue, rockContext );
+                            isChanged = true;
                             History.EvaluateChange( personChanges, attribute.Name, formattedOriginalValue, formattedNewValue );
                         }
                     }
                 }
+            }
+
+            return isChanged;
+        }
+
+        /// <summary>
+        /// Upserts the registrant.
+        /// </summary>
+        /// <param name="rockContext">The rock context.</param>
+        /// <param name="context">The context.</param>
+        /// <param name="registrar">The registrar.</param>
+        /// <param name="registrarFamilyGuid">The registrar family unique identifier.</param>
+        /// <param name="registrantInfo">The registrant information.</param>
+        /// <param name="index">The index.</param>
+        /// <param name="multipleFamilyGroupIds">The multiple family group ids.</param>
+        /// <param name="singleFamilyId">The single family identifier.</param>
+        /// <param name="isWaitlist">if set to <c>true</c> [is waitlist].</param>
+        private void UpsertRegistrant(
+            RockContext rockContext,
+            RegistrationContext context,
+            Person registrar,
+            Guid registrarFamilyGuid,
+            ViewModel.Blocks.Event.RegistrationEntry.RegistrantInfo registrantInfo,
+            int index,
+            Dictionary<Guid, int> multipleFamilyGroupIds,
+            ref int? singleFamilyId,
+            bool isWaitlist )
+        {
+            // Force waitlist if specified by param, but allow waitlist if requested
+            isWaitlist |= ( context.RegistrationSettings.IsWaitListEnabled && registrantInfo.IsOnWaitList );
+
+            var personService = new PersonService( rockContext );
+            var registrationInstanceService = new RegistrationInstanceService( rockContext );
+            var registrantService = new RegistrationRegistrantService( rockContext );
+
+            var registrantChanges = new History.HistoryChangeList();
+            var personChanges = new History.HistoryChangeList();
+
+            var (person, registrant) = GetExistingOrCreatePerson( context, registrantInfo, registrar, registrarFamilyGuid, rockContext );
+
+            var familyGroupType = GroupTypeCache.Get( Rock.SystemGuid.GroupType.GROUPTYPE_FAMILY );
+            var adultRoleId = familyGroupType.Roles
+                .Where( r => r.Guid.Equals( Rock.SystemGuid.GroupRole.GROUPROLE_FAMILY_MEMBER_ADULT.AsGuid() ) )
+                .Select( r => r.Id )
+                .FirstOrDefault();
+            var childRoleId = familyGroupType.Roles
+                .Where( r => r.Guid.Equals( Rock.SystemGuid.GroupRole.GROUPROLE_FAMILY_MEMBER_CHILD.AsGuid() ) )
+                .Select( r => r.Id )
+                .FirstOrDefault();
+
+            // Update the person object from the registrant information.
+            var (campusId, location) = UpdatePersonFromRegistrant( person, registrantInfo, personChanges, context.RegistrationSettings );
+
+            // If campus was not provided, then check the page parameter.
+            campusId = campusId ?? PageParameter( PageParameterKey.CampusId ).AsIntegerOrNull();
+
+            // Save the person ( and family if needed )
+            SavePerson( rockContext, context.RegistrationSettings, person, registrantInfo.FamilyGuid ?? Guid.NewGuid(), campusId, location, adultRoleId, childRoleId, multipleFamilyGroupIds, ref singleFamilyId );
+
+            // Load the person's attributes
+            person.LoadAttributes();
+
+            if ( UpdatePersonAttributes( person, personChanges, registrantInfo, context.RegistrationSettings ) )
+            {
+                person.SaveAttributeValues( rockContext );
             }
 
             var registrantName = person.FullName + ": ";
@@ -1727,41 +1803,9 @@ namespace Rock.Blocks.Event
 
             // Set any of the template's registrant attributes
             registrant.LoadAttributes();
-            var registrantAttributeFields = context.RegistrationSettings.Forms
-                .SelectMany( f => f.Fields.Where( ff => ff.AttributeId.HasValue && ff.FieldSource == RegistrationFieldSource.RegistrantAttribute ) )
-                .ToList();
-
-            foreach ( var field in registrantAttributeFields )
+            if ( UpdateRegistrantAttributes( registrant, registrantInfo, registrantChanges, context.RegistrationSettings ) )
             {
-                var attribute = AttributeCache.Get( field.AttributeId.Value );
-
-                if ( attribute is null )
-                {
-                    continue;
-                }
-
-                var newValue = registrantInfo.FieldValues.GetValueOrNull( field.Guid );
-                var originalValue = registrant.GetAttributeValue( attribute.Key );
-                var newValueAsString = PublicAttributeHelper.GetPrivateValue( attribute, newValue.ToStringSafe() );
-                registrant.SetAttributeValue( attribute.Key, newValueAsString );
-
-                if ( ( originalValue ?? string.Empty ).Trim() != ( newValueAsString ?? string.Empty ).Trim() )
-                {
-                    var formattedOriginalValue = string.Empty;
-                    if ( !string.IsNullOrWhiteSpace( originalValue ) )
-                    {
-                        formattedOriginalValue = attribute.FieldType.Field.GetTextValue( originalValue, attribute.ConfigurationValues );
-                    }
-
-                    string formattedNewValue = string.Empty;
-                    if ( !string.IsNullOrWhiteSpace( newValueAsString ) )
-                    {
-                        formattedNewValue = attribute.FieldType.Field.GetTextValue( newValueAsString, attribute.ConfigurationValues );
-                    }
-
-                    Helper.SaveAttributeValue( registrant, attribute, newValueAsString, rockContext );
-                    History.EvaluateChange( registrantChanges, attribute.Name, formattedOriginalValue, formattedNewValue );
-                }
+                rockContext.SaveChanges();
             }
 
             var currentPerson = GetCurrentPerson();
@@ -1783,6 +1827,59 @@ namespace Rock.Blocks.Event
             // Clear this registrant's family guid so it's not updated again
             registrantInfo.FamilyGuid = Guid.Empty;
             registrantInfo.PersonGuid = person.Guid;
+        }
+
+        /// <summary>
+        /// Updates the registrant attribute values with those provided by the
+        /// registrant information.
+        /// </summary>
+        /// <param name="registrant">The registrant to be updated.</param>
+        /// <param name="registrantInfo">The registrant information.</param>
+        /// <param name="registrantChanges">The registrant changes that were made.</param>
+        /// <param name="settings">The registration settings.</param>
+        /// <returns><c>true</c> if any attributes were modified, <c>false</c> otherwise.</returns>
+        private bool UpdateRegistrantAttributes( RegistrationRegistrant registrant, ViewModel.Blocks.Event.RegistrationEntry.RegistrantInfo registrantInfo, History.HistoryChangeList registrantChanges, RegistrationSettings settings )
+        {
+            var isChanged = false;
+            var registrantAttributeFields = settings.Forms
+                .SelectMany( f => f.Fields.Where( ff => ff.AttributeId.HasValue && ff.FieldSource == RegistrationFieldSource.RegistrantAttribute ) )
+                .ToList();
+
+            foreach ( var field in registrantAttributeFields )
+            {
+                var attribute = AttributeCache.Get( field.AttributeId.Value );
+
+                if ( attribute is null )
+                {
+                    continue;
+                }
+
+                var originalValue = registrant.GetAttributeValue( attribute.Key );
+                var newValue = registrantInfo.FieldValues.GetValueOrNull( field.Guid ).ToStringSafe();
+                newValue = PublicAttributeHelper.GetPrivateValue( attribute, newValue );
+
+                registrant.SetAttributeValue( attribute.Key, newValue );
+
+                if ( ( originalValue ?? string.Empty ).Trim() != ( newValue ?? string.Empty ).Trim() )
+                {
+                    var formattedOriginalValue = string.Empty;
+                    if ( !string.IsNullOrWhiteSpace( originalValue ) )
+                    {
+                        formattedOriginalValue = attribute.FieldType.Field.GetTextValue( originalValue, attribute.ConfigurationValues );
+                    }
+
+                    string formattedNewValue = string.Empty;
+                    if ( !string.IsNullOrWhiteSpace( newValue ) )
+                    {
+                        formattedNewValue = attribute.FieldType.Field.GetTextValue( newValue, attribute.ConfigurationValues );
+                    }
+
+                    isChanged = true;
+                    History.EvaluateChange( registrantChanges, attribute.Name, formattedOriginalValue, formattedNewValue );
+                }
+            }
+
+            return isChanged;
         }
 
         /// <summary>
@@ -3079,6 +3176,88 @@ namespace Rock.Blocks.Event
         }
 
         /// <summary>
+        /// Builds a new <see cref="GroupMember"/> object that will be saved to
+        /// the database later.
+        /// </summary>
+        /// <param name="person">The person that will be added to the group.</param>
+        /// <param name="group">The group the person will be added to.</param>
+        /// <param name="settings">The registration settings.</param>
+        /// <returns>A new <see cref="GroupMember"/> instance.</returns>
+        private GroupMember BuildGroupMember( Person person, Group group, RegistrationSettings settings )
+        {
+            var groupMember = new GroupMember();
+            groupMember.GroupId = group.Id;
+            groupMember.Group = group;
+            groupMember.PersonId = person.Id;
+            groupMember.Person = person;
+            groupMember.GroupMemberStatus = settings.GroupMemberStatus;
+
+            if ( settings.GroupTypeId.HasValue &&
+                settings.GroupTypeId == group.GroupTypeId &&
+                settings.GroupMemberRoleId.HasValue )
+            {
+                groupMember.GroupRoleId = settings.GroupMemberRoleId.Value;
+            }
+            else
+            {
+                if ( group.GroupType.DefaultGroupRoleId.HasValue )
+                {
+                    groupMember.GroupRoleId = group.GroupType.DefaultGroupRoleId.Value;
+                }
+                else
+                {
+                    groupMember.GroupRoleId = group.GroupType.Roles.Select( r => r.Id ).FirstOrDefault();
+                }
+            }
+
+            return groupMember;
+        }
+
+        /// <summary>
+        /// Updates the group member attributes from the registrant information.
+        /// </summary>
+        /// <param name="groupMember">The group member to be updated.</param>
+        /// <param name="registrantInfo">The registrant information.</param>
+        /// <param name="settings">The registration settings.</param>
+        /// <returns><c>true</c> if any attribute value was changed, <c>false</c> otherwise.</returns>
+        private bool UpdateGroupMemberAttributes( GroupMember groupMember, ViewModel.Blocks.Event.RegistrationEntry.RegistrantInfo registrantInfo, RegistrationSettings settings )
+        {
+            bool isChanged = false;
+            var memberAttributeFields = settings.Forms
+                .SelectMany( f => f.Fields
+                    .Where( t =>
+                        t.FieldSource == RegistrationFieldSource.GroupMemberAttribute &&
+                        t.AttributeId.HasValue ) );
+
+            foreach ( var field in memberAttributeFields )
+            {
+                // Find the registrant's value
+                var fieldValue = registrantInfo.FieldValues
+                    .Where( f => f.Key == field.Guid )
+                    .Select( f => f.Value )
+                    .FirstOrDefault();
+
+                if ( fieldValue != null )
+                {
+                    var attribute = AttributeCache.Get( field.AttributeId.Value );
+                    if ( attribute != null )
+                    {
+                        string originalValue = groupMember.GetAttributeValue( attribute.Key );
+                        string newValue = PublicAttributeHelper.GetPrivateValue( attribute, fieldValue.ToString() );
+                        groupMember.SetAttributeValue( attribute.Key, newValue );
+
+                        if ( ( originalValue ?? string.Empty ).Trim() != ( newValue ?? string.Empty ).Trim() )
+                        {
+                            isChanged = true;
+                        }
+                    }
+                }
+            }
+
+            return isChanged;
+        }
+
+        /// <summary>
         /// Adds the registrants to group.
         /// </summary>
         /// <param name="rockContext">The rock context.</param>
@@ -3110,32 +3289,14 @@ namespace Rock.Blocks.Event
                 GroupMember groupMember = group.Members.Where( m => m.PersonId == personAlias.PersonId ).FirstOrDefault();
                 if ( groupMember == null )
                 {
-                    groupMember = new GroupMember();
-                    groupMember.GroupId = group.Id;
-                    groupMember.PersonId = personAlias.PersonId;
-
-                    if ( settings.GroupTypeId.HasValue &&
-                        settings.GroupTypeId == group.GroupTypeId &&
-                        settings.GroupMemberRoleId.HasValue )
-                    {
-                        groupMember.GroupRoleId = settings.GroupMemberRoleId.Value;
-                    }
-                    else
-                    {
-                        if ( group.GroupType.DefaultGroupRoleId.HasValue )
-                        {
-                            groupMember.GroupRoleId = group.GroupType.DefaultGroupRoleId.Value;
-                        }
-                        else
-                        {
-                            groupMember.GroupRoleId = group.GroupType.Roles.Select( r => r.Id ).FirstOrDefault();
-                        }
-                    }
+                    groupMember = BuildGroupMember( personAlias.Person, group, settings );
 
                     groupMemberService.Add( groupMember );
                 }
-
-                groupMember.GroupMemberStatus = settings.GroupMemberStatus;
+                else
+                {
+                    groupMember.GroupMemberStatus = settings.GroupMemberStatus;
+                }
 
                 rockContext.SaveChanges();
 
@@ -3148,45 +3309,9 @@ namespace Rock.Blocks.Event
                 var registrantInfo = args.Registrants.FirstOrDefault( r => r.Guid == registrant.Guid );
                 if ( registrantInfo != null )
                 {
-                    foreach ( var field in settings.Forms
-                        .SelectMany( f => f.Fields
-                            .Where( t =>
-                                t.FieldSource == RegistrationFieldSource.GroupMemberAttribute &&
-                                t.AttributeId.HasValue ) ) )
+                    if ( UpdateGroupMemberAttributes( groupMember, registrantInfo, settings ) )
                     {
-                        // Find the registrant's value
-                        var fieldValue = registrantInfo.FieldValues
-                            .Where( f => f.Key == field.Guid )
-                            .Select( f => f.Value )
-                            .FirstOrDefault();
-
-                        if ( fieldValue != null )
-                        {
-                            var attribute = AttributeCache.Get( field.AttributeId.Value );
-                            if ( attribute != null )
-                            {
-                                string originalValue = groupMember.GetAttributeValue( attribute.Key );
-                                string newValue = PublicAttributeHelper.GetPrivateValue( attribute, fieldValue.ToString() );
-                                groupMember.SetAttributeValue( attribute.Key, newValue );
-
-                                if ( ( originalValue ?? string.Empty ).Trim() != ( newValue ?? string.Empty ).Trim() )
-                                {
-                                    string formattedOriginalValue = string.Empty;
-                                    if ( !string.IsNullOrWhiteSpace( originalValue ) )
-                                    {
-                                        formattedOriginalValue = attribute.FieldType.Field.GetTextValue( originalValue, attribute.ConfigurationValues );
-                                    }
-
-                                    string formattedNewValue = string.Empty;
-                                    if ( !string.IsNullOrWhiteSpace( newValue ) )
-                                    {
-                                        formattedNewValue = attribute.FieldType.Field.GetTextValue( newValue, attribute.ConfigurationValues );
-                                    }
-
-                                    Helper.SaveAttributeValue( groupMember, attribute, newValue, rockContext );
-                                }
-                            }
-                        }
+                        groupMember.SaveAttributeValues( rockContext );
                     }
                 }
             }
