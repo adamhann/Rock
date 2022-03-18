@@ -44,7 +44,7 @@ namespace Rock.Model
         /// <summary>
         /// Returns true of this document was generated using a legacy document provider.
         /// </summary>
-        /// <returns><c>true</c> if XXXX, <c>false</c> otherwise.</returns>
+        /// <returns><c>true</c> if the template uses a legacy document provider, <c>false</c> otherwise.</returns>
         public bool UsesLegacyDocumentProvider()
         {
             bool isLegacyProvider = this.SignatureDocumentTemplate?.ProviderEntityTypeId != null;

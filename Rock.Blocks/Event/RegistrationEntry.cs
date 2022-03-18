@@ -20,14 +20,18 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data.Entity;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
 using Rock.Attribute;
 using Rock.ClientService.Core.Campus;
 using Rock.ClientService.Finance.FinancialPersonSavedAccount;
 using Rock.ClientService.Finance.FinancialPersonSavedAccount.Options;
 using Rock.Data;
+using Rock.ElectronicSignature;
 using Rock.Financial;
 using Rock.Model;
+using Rock.Pdf;
 using Rock.Tasks;
 using Rock.ViewModel;
 using Rock.ViewModel.Blocks.Event.RegistrationEntry;
@@ -376,6 +380,189 @@ namespace Rock.Blocks.Event
             }
         }
 
+        /// <summary>
+        /// Gets the signature document data for a specific registrant.
+        /// </summary>
+        /// <param name="args">The registration entry arguments.</param>
+        /// <param name="registrantGuid">The unique identifier of the registrant to build the signature document.</param>
+        /// <returns>An instance of <see cref="RegistrationEntrySignatureDocument"/> that contains the document information.</returns>
+        [BlockAction]
+        public BlockActionResult GetSignatureDocumentData( RegistrationEntryBlockArgs args, Guid registrantGuid )
+        {
+            var registrantInfo = args.Registrants.FirstOrDefault( r => r.Guid == registrantGuid );
+
+            if ( registrantInfo == null )
+            {
+                return ActionBadRequest( "Invalid registrant." );
+            }
+
+            using ( var rockContext = new RockContext() )
+            {
+                var context = GetContext( rockContext, args, out var errorMessage );
+
+                if ( !errorMessage.IsNullOrWhiteSpace() )
+                {
+                    return ActionBadRequest( errorMessage );
+                }
+
+                var registrationInstance = new RegistrationInstanceService( rockContext ).Get( context.RegistrationSettings.RegistrationInstanceId );
+                var documentTemplate = new SignatureDocumentTemplateService( rockContext ).Get( context.RegistrationSettings.SignatureDocumentTemplateId ?? 0 );
+
+                if ( documentTemplate == null || !documentTemplate.IsActive/* OR IS LEGACY */)
+                {
+                    return ActionBadRequest( "Invalid signature template." );
+                }
+
+                var isNewRegistration = context.Registration == null;
+                Person registrar = null;
+
+                if ( isNewRegistration )
+                {
+                    // This is a new registration, generate a fake registration
+                    // for the various support methods used.
+                    context.Registration = new Registration
+                    {
+                        RegistrationInstanceId = context.RegistrationSettings.RegistrationInstanceId
+                    };
+
+                    if ( context.RegistrationSettings.RegistrarOption == RegistrarOption.UseLoggedInPerson && RequestContext.CurrentPerson != null )
+                    {
+                        registrar = RequestContext.CurrentPerson;
+                        context.Registration.PersonAliasId = registrar.PrimaryAliasId;
+                    }
+                }
+                else
+                {
+                    // This is an existing registration, re-use the old registrar.
+                    registrar = context.Registration.PersonAlias.Person;
+
+                    var registrationService = new RegistrationService( rockContext );
+                    var previousRegistration = registrationService.Get( args.RegistrationGuid.Value );
+
+                    if ( previousRegistration != null )
+                    {
+                        isNewRegistration = false;
+                    }
+                }
+
+                // If the registrar person record does not exist, try to find the record.
+                if ( registrar == null )
+                {
+                    registrar = GetExistingRegistrarPerson( context, RequestContext.CurrentPerson, rockContext );
+                }
+
+                var registrarFamily = registrar?.GetFamily( rockContext );
+
+                // Process the Person so we have data for the Lava merge.
+                var (person, registrant) = GetExistingOrCreatePerson( context, registrantInfo, registrar, registrarFamily?.Guid ?? Guid.Empty, rockContext );
+                var (campusId, location) = UpdatePersonFromRegistrant( person, registrantInfo, new History.HistoryChangeList(), context.RegistrationSettings );
+
+                if ( person.Attributes == null )
+                {
+                    person.LoadAttributes( rockContext );
+                }
+
+                UpdatePersonAttributes( person, new History.HistoryChangeList(), registrantInfo, context.RegistrationSettings );
+
+                // Process the GroupMember so we have data for the Lava merge.
+                GroupMember groupMember = null;
+                var groupId = GetRegistrationGroupId( rockContext );
+
+                if ( groupId.HasValue )
+                {
+                    var group = new GroupService( rockContext ).Get( groupId.Value );
+
+                    groupMember = BuildGroupMember( person, group, context.RegistrationSettings );
+                    groupMember.LoadAttributes( rockContext );
+                    UpdateGroupMemberAttributes( groupMember, registrantInfo, context.RegistrationSettings );
+                }
+
+                // Prepare the merge fields.
+                var campusCache = campusId.HasValue ? CampusCache.Get( campusId.Value ) : null;
+                var mergeFields = new Dictionary<string, object>
+                {
+                    { "Registration", new LavaSignatureRegistration( registrationInstance, groupId, args.Registrants.Count ) },
+                    { "Registrant", new LavaSignatureRegistrant( person, location, campusCache, groupMember ) }
+                };
+
+                var html = ElectronicSignatureHelper.GetSignatureDocumentHtml( documentTemplate.LavaTemplate, mergeFields );
+
+                // Calculate a document hash from the registrant information to
+                // be used later to validate the document after signing.
+                var fieldHashToken = GetRegistrantSignatureHashToken( registrantInfo );
+                var unencryptedSecurityToken = new[] { RockDateTime.Now.ToString( "o" ), GetSha256Hash( fieldHashToken + html ) }.ToJson();
+                var encryptedSecurityToken = Security.Encryption.EncryptString( unencryptedSecurityToken );
+
+                return ActionOk( new RegistrationEntrySignatureDocument
+                {
+                    DocumentHtml = html,
+                    SecurityToken = encryptedSecurityToken
+                } );
+            }
+        }
+
+        /// <summary>
+        /// Signs the document previously returned by <see cref="GetSignatureDocumentData(RegistrationEntryBlockArgs, Guid)"/>.
+        /// </summary>
+        /// <param name="args">The registration entry arguments.</param>
+        /// <param name="registrantGuid">The unique identifier of the registrant this document will apply to.</param>
+        /// <param name="documentHtml">The document HTML that was signed.</param>
+        /// <param name="securityToken">The security token to validate the request.</param>
+        /// <param name="signature">The signature of the person that signed the document.</param>
+        /// <returns>A string that contains the encoded signed document details.</returns>
+        [BlockAction]
+        public BlockActionResult SignDocument( RegistrationEntryBlockArgs args, Guid registrantGuid, string documentHtml, string securityToken, ElectronicSignatureValueViewModel signature )
+        {
+            var registrantInfo = args.Registrants.FirstOrDefault( r => r.Guid == registrantGuid );
+
+            if ( registrantInfo == null )
+            {
+                return ActionBadRequest( "Invalid registrant." );
+            }
+
+            using ( var rockContext = new RockContext() )
+            {
+                var context = GetContext( rockContext, args, out var errorMessage );
+
+                if ( !errorMessage.IsNullOrWhiteSpace() )
+                {
+                    return ActionBadRequest( errorMessage );
+                }
+
+                var registrationInstance = new RegistrationInstanceService( rockContext ).Get( context.RegistrationSettings.RegistrationInstanceId );
+                var documentTemplate = new SignatureDocumentTemplateService( rockContext ).Get( context.RegistrationSettings.SignatureDocumentTemplateId ?? 0 );
+
+                if ( documentTemplate == null || !documentTemplate.IsActive/* OR IS LEGACY */)
+                {
+                    return ActionBadRequest( "Invalid signature template." );
+                }
+
+                // Validate they did not modify any of the fields or the signed HTML.
+                var unencryptedSecurityToken = Security.Encryption.DecryptString( securityToken ).FromJsonOrNull<List<string>>();
+                var fieldHashToken = GetRegistrantSignatureHashToken( registrantInfo );
+                var hash = GetSha256Hash( fieldHashToken + documentHtml );
+
+                if ( unencryptedSecurityToken == null || unencryptedSecurityToken.Count != 2 || hash != unencryptedSecurityToken[1] )
+                {
+                    return ActionBadRequest( "Invalid security token." );
+                }
+
+                // Create the details of the signed document for later use.
+                var signedData = new SignedDocumentData
+                {
+                    IpAddress = RequestContext.ClientInformation.IpAddress,
+                    UserAgent = RequestContext.ClientInformation.UserAgent,
+                    DocumentHtml = documentHtml,
+                    SignedDateTime = RockDateTime.Now,
+                    SignatureData = signature.SignatureData,
+                    SignedByName = signature.SignedByName,
+                    SignedByEmail = signature.SignedByEmail
+                };
+
+                return ActionOk( Security.Encryption.EncryptString( signedData.ToJson() ) );
+            }
+        }
+
         #endregion Block Actions
 
         #region Helpers
@@ -448,6 +635,7 @@ namespace Rock.Blocks.Event
             errorMessage = string.Empty;
             var currentPerson = GetCurrentPerson();
 
+            var postSaveActions = new List<Action>();
             var registrationChanges = new History.HistoryChangeList();
             Person registrar = null;
             List<int> previousRegistrantPersonIds = null;
@@ -676,7 +864,9 @@ namespace Rock.Blocks.Event
                         index,
                         multipleFamilyGroupIds,
                         ref singleFamilyId,
-                        forceWaitlist );
+                        forceWaitlist,
+                        isNewRegistration,
+                        postSaveActions );
 
                     index++;
                 }
@@ -738,7 +928,7 @@ namespace Rock.Blocks.Event
             // If there is a valid registration, and nothing went wrong processing the payment, add registrants to group and send the notifications
             if ( context.Registration != null && !context.Registration.IsTemporary )
             {
-                ProcessPostSave( rockContext, context.RegistrationSettings, args, isNewRegistration, context.Registration, previousRegistrantPersonIds );
+                ProcessPostSave( rockContext, context.RegistrationSettings, args, isNewRegistration, context.Registration, previousRegistrantPersonIds, postSaveActions );
             }
 
             return context.Registration;
@@ -1604,7 +1794,9 @@ namespace Rock.Blocks.Event
         /// <param name="index">The index.</param>
         /// <param name="multipleFamilyGroupIds">The multiple family group ids.</param>
         /// <param name="singleFamilyId">The single family identifier.</param>
-        /// <param name="isWaitlist">if set to <c>true</c> [is waitlist].</param>
+        /// <param name="isWaitlist">if set to <c>true</c> then registrant is on the wait list.</param>
+        /// <param name="isNewRegistration"><c>true</c> if the registration is new; otherwise <c>false</c>.</param>
+        /// <param name="postSaveActions">Additional post save actions that can be appended to.</param>
         private void UpsertRegistrant(
             RockContext rockContext,
             RegistrationContext context,
@@ -1614,7 +1806,9 @@ namespace Rock.Blocks.Event
             int index,
             Dictionary<Guid, int> multipleFamilyGroupIds,
             ref int? singleFamilyId,
-            bool isWaitlist )
+            bool isWaitlist,
+            bool isNewRegistration,
+            List<Action> postSaveActions )
         {
             // Force waitlist if specified by param, but allow waitlist if requested
             isWaitlist |= ( context.RegistrationSettings.IsWaitListEnabled && registrantInfo.IsOnWaitList );
@@ -1806,6 +2000,30 @@ namespace Rock.Blocks.Event
             if ( UpdateRegistrantAttributes( registrant, registrantInfo, registrantChanges, context.RegistrationSettings ) )
             {
                 rockContext.SaveChanges();
+            }
+
+            // Save the signed document if we have one. We only process a document
+            // if this is a new registration since editing registrations with an
+            // inline signature is not currently supported.
+            if ( context.RegistrationSettings.SignatureDocumentTemplateId.HasValue && context.RegistrationSettings.IsInlineSignatureRequired && isNewRegistration )
+            {
+                var documentTemplate = new SignatureDocumentTemplateService( rockContext ).Get( context.RegistrationSettings.SignatureDocumentTemplateId ?? 0 );
+                var signedData = Security.Encryption.DecryptString( registrantInfo.SignatureData ).FromJsonOrThrow<SignedDocumentData>();
+                var signedBy = RequestContext.CurrentPerson ?? registrar;
+
+                var document = CreateSignatureDocument( documentTemplate, signedData, registrant, signedBy, registrar, person );
+
+                new SignatureDocumentService( rockContext ).Add( document );
+                rockContext.SaveChanges();
+
+                // Send communication after the save is complete.
+                if ( documentTemplate.CompletionSystemCommunication != null )
+                {
+                    postSaveActions.Add( () =>
+                    {
+                        ElectronicSignatureHelper.SendSignatureCompletionCommunication( document.Id, out _ );
+                    } );
+                }
             }
 
             var currentPerson = GetCurrentPerson();
@@ -2194,10 +2412,12 @@ namespace Rock.Blocks.Event
                 }
             }
 
-            // Determine the starting point
-            var allowRegistrationUpdates = !isExistingRegistration || context.RegistrationSettings.AllowExternalRegistrationUpdates;
+            // Determine the starting point. External registration updates are
+            // currently only supported if we are not doing inline signatures.
+            var allowExternalRegistrationUpdates = context.RegistrationSettings.AllowExternalRegistrationUpdates && !context.RegistrationSettings.IsInlineSignatureRequired;
+            var allowRegistrationUpdates = !isExistingRegistration || allowExternalRegistrationUpdates;
             var startAtBeginning = !isExistingRegistration ||
-                ( context.RegistrationSettings.AllowExternalRegistrationUpdates && PageParameter( PageParameterKey.StartAtBeginning ).AsBoolean() );
+                ( allowExternalRegistrationUpdates && PageParameter( PageParameterKey.StartAtBeginning ).AsBoolean() );
 
             var viewModel = new RegistrationEntryBlockViewModel
             {
@@ -2272,6 +2492,19 @@ namespace Rock.Blocks.Event
                 EnableSaveAccount = enableSavedAccount,
                 SavedAccounts = savedAccounts
             };
+
+            if ( context.RegistrationSettings.SignatureDocumentTemplateId.HasValue && context.RegistrationSettings.IsInlineSignatureRequired )
+            {
+                var documentTemplate = new SignatureDocumentTemplateService( rockContext ).Get( context.RegistrationSettings.SignatureDocumentTemplateId.Value );
+
+                if ( documentTemplate != null && !documentTemplate.IsLegacyProvider() )
+                {
+                    viewModel.IsInlineSignatureRequired = context.RegistrationSettings.IsInlineSignatureRequired;
+                    viewModel.IsSignatureDrawn = context.RegistrationSettings.IsSignatureDrawn;
+                    viewModel.SignatureDocumentTerm = context.RegistrationSettings.SignatureDocumentTerm;
+                    viewModel.SignatureDocumentTemplateName = context.RegistrationSettings.SignatureDocumentTemplateName;
+                }
+            }
 
             return viewModel;
         }
@@ -3114,7 +3347,8 @@ namespace Rock.Blocks.Event
         /// <param name="isNewRegistration">if set to <c>true</c> [is new registration].</param>
         /// <param name="registration">The registration.</param>
         /// <param name="previousRegistrantPersonIds">The previous registrant person ids.</param>
-        private void ProcessPostSave( RockContext rockContext, RegistrationSettings settings, RegistrationEntryBlockArgs args, bool isNewRegistration, Registration registration, List<int> previousRegistrantPersonIds )
+        /// <param name="postSaveActions">Additional actions to run during the post save process.</param>
+        private void ProcessPostSave( RockContext rockContext, RegistrationSettings settings, RegistrationEntryBlockArgs args, bool isNewRegistration, Registration registration, List<int> previousRegistrantPersonIds, List<Action> postSaveActions )
         {
             var currentPerson = GetCurrentPerson();
             var currentPersonAliasId = currentPerson?.PrimaryAliasId;
@@ -3147,10 +3381,7 @@ namespace Rock.Blocks.Event
                 {
                     RegistrationId = registration.Id
                 }.Send();
-            }
 
-            if ( isNewRegistration )
-            {
                 var registrationService = new RegistrationService( new RockContext() );
                 var newRegistration = registrationService.Get( registration.Id );
 
@@ -3171,6 +3402,19 @@ namespace Rock.Blocks.Event
                             newRegistration.LaunchWorkflow( workflowTypeId, newRegistration.ToString(), null, null );
                         }
                     }
+                }
+            }
+
+            // Run all the additional post save actions.
+            foreach ( var postSaveAction in postSaveActions )
+            {
+                try
+                {
+                    postSaveAction();
+                }
+                catch ( Exception ex )
+                {
+                    ExceptionLogService.LogException( ex );
                 }
             }
         }
@@ -3317,6 +3561,333 @@ namespace Rock.Blocks.Event
             }
         }
 
+        /// <summary>
+        /// Gets the registrant signature hash token. This token contains all the
+        /// fields related to a registrant in a deterministic order so it can be
+        /// used for validation later.
+        /// </summary>
+        /// <param name="registrantInfo">The registrant information.</param>
+        /// <returns>A <see cref="string"/> that contains the token to be hashed.</returns>
+        private string GetRegistrantSignatureHashToken( ViewModel.Blocks.Event.RegistrationEntry.RegistrantInfo registrantInfo )
+        {
+            return registrantInfo.FieldValues
+                .OrderBy( kvp => kvp.Key )
+                .ThenBy( kvp => kvp.Value.ToStringSafe() )
+                .Select( kvp => $"{kvp.Key}:{kvp.ToStringSafe()}" )
+                .JoinStrings( "," );
+        }
+
+        /// <summary>
+        /// Creates a SHA-256 hashed value of the source string. The hash is
+        /// then base 64 encoded before it is returned.
+        /// </summary>
+        /// <param name="source">The source string to be hashed.</param>
+        /// <returns>A <see cref="string"/> that contains the base-64 encoded hash value.</returns>
+        private string GetSha256Hash( string source )
+        {
+            using ( var sha256 = SHA256.Create() )
+            {
+                var hashed = sha256.ComputeHash( Encoding.Unicode.GetBytes( source ) );
+
+                return Convert.ToBase64String( hashed );
+            }
+        }
+
+        /// <summary>
+        /// Creates the signature document object in memory for later saving to
+        /// the database. The document and the associated BinaryFile are both
+        /// populated.
+        /// </summary>
+        /// <param name="signatureDocumentTemplate">The signature document template.</param>
+        /// <param name="documentData">The document data from a previous signing session.</param>
+        /// <param name="entity">The entity that should be associated with the document.</param>
+        /// <param name="signedBy">The <see cref="Person"/> that signed the document.</param>
+        /// <param name="assignedTo">The <see cref="Person"/> that is the responsible party for signing the document.</param>
+        /// <param name="appliesTo">The <see cref="Person"/> that this document will apply to.</param>
+        /// <returns>A <see cref="SignatureDocument"/> object that can be saved to the database.</returns>
+        private static SignatureDocument CreateSignatureDocument( SignatureDocumentTemplate signatureDocumentTemplate, SignedDocumentData documentData, IEntity entity, Person signedBy, Person assignedTo, Person appliesTo )
+        {
+            // Glue stuff into the signature document
+            var signatureDocument = new SignatureDocument
+            {
+                SignatureDocumentTemplateId = signatureDocumentTemplate.Id,
+                Status = SignatureDocumentStatus.Signed,
+                Name = "Signed Document",
+                EntityTypeId = entity != null ? EntityTypeCache.GetId( entity.GetType() ) : null,
+                EntityId = entity?.Id,
+                SignedByPersonAliasId = signedBy.PrimaryAliasId,
+                AssignedToPersonAliasId = assignedTo.PrimaryAliasId,
+                AppliesToPersonAliasId = appliesTo.PrimaryAliasId,
+
+                SignedDocumentText = documentData.DocumentHtml,
+                LastStatusDate = documentData.SignedDateTime,
+                SignedDateTime = documentData.SignedDateTime,
+
+                SignatureData = documentData.SignatureData,
+                SignedName = documentData.SignedByName,
+                SignedByEmail = documentData.SignedByEmail,
+
+                SignedClientIp = documentData.IpAddress,
+                SignedClientUserAgent = documentData.UserAgent
+            };
+
+            // Needed before determining SignatureInformation (Signed Name, metadata)
+            signatureDocument.SignatureVerificationHash = SignatureDocumentService.CalculateSignatureVerificationHash( signatureDocument );
+
+            var signatureInformationHtmlArgs = new GetSignatureInformationHtmlOptions
+            {
+                SignatureType = signatureDocumentTemplate.SignatureType,
+                SignedName = signatureDocument.SignedName,
+                DrawnSignatureDataUrl = signatureDocument.SignatureData,
+                SignedByPerson = signedBy,
+                SignedDateTime = signatureDocument.SignedDateTime,
+                SignedClientIp = signatureDocument.SignedClientIp,
+                SignatureVerificationHash = signatureDocument.SignatureVerificationHash
+            };
+
+            // Helper takes care of generating HTML and combining SignatureDocumentHTML and signedSignatureDocumentHtml into the final Signed Document
+            var signatureInformationHtml = ElectronicSignatureHelper.GetSignatureInformationHtml( signatureInformationHtmlArgs );
+            var signedSignatureDocumentHtml = ElectronicSignatureHelper.GetSignedDocumentHtml( documentData.DocumentHtml, signatureInformationHtml );
+
+            // Generate the PDF representation of the form.
+            using ( var pdfGenerator = new PdfGenerator() )
+            {
+                var binaryFileTypeId = signatureDocumentTemplate.BinaryFileTypeId;
+                if ( !binaryFileTypeId.HasValue )
+                {
+                    binaryFileTypeId = BinaryFileTypeCache.GetId( Rock.SystemGuid.BinaryFiletype.DIGITALLY_SIGNED_DOCUMENTS.AsGuid() );
+                }
+
+                signatureDocument.BinaryFile = pdfGenerator.GetAsBinaryFileFromHtml( binaryFileTypeId ?? 0, signatureDocument.Name, signedSignatureDocumentHtml );
+                signatureDocument.BinaryFile.IsTemporary = false;
+            }
+
+            return signatureDocument;
+        }
+
         #endregion Helpers
+
+        #region Internal Classes
+
+        /// <summary>
+        /// Provides a custom registration object that is used during Lava merge
+        /// for a signature document.
+        /// </summary>
+        private class LavaSignatureRegistration : Rock.Lava.LavaDataObject
+        {
+            public int InstanceId { get; }
+
+            public string InstanceName { get; }
+
+            public int TemplateId { get; }
+
+            public string TemplateName { get; }
+
+            public string RegistrationTerm { get; }
+
+            public string RegistrantTerm { get; }
+
+            public int RegistrantCount { get; }
+
+            public int? GroupId { get; }
+
+            public LavaSignatureRegistration( RegistrationInstance registrationInstance, int? groupId, int registrantCount )
+            {
+                InstanceId = registrationInstance.Id;
+                InstanceName = registrationInstance.Name;
+                TemplateId = registrationInstance.RegistrationTemplateId;
+                TemplateName = registrationInstance.RegistrationTemplate.Name;
+                RegistrationTerm = registrationInstance.RegistrationTemplate.RegistrationTerm;
+                RegistrantTerm = registrationInstance.RegistrationTemplate.RegistrantTerm;
+                RegistrantCount = registrantCount;
+                GroupId = groupId;
+            }
+        }
+
+        /// <summary>
+        /// Provides a custom registrant object that is used during Lava merge
+        /// for a signature document.
+        /// </summary>
+        private class LavaSignatureRegistrant : LavaHasAttributes
+        {
+            public Location Address { get; }
+
+            public DateTime? AnniversaryDate { get; }
+
+            public DateTime? BirthDate { get; }
+
+            public CampusCache Campus { get; }
+
+            public DefinedValueCache ConnectionStatus { get; }
+
+            public string Email { get; }
+
+            public string FirstName { get; }
+
+            public Gender Gender { get; }
+
+            public string GradeFormatted { get; }
+
+            public int? GradeOffset { get; }
+
+            public int? GraduationYear { get; }
+
+            public string HomePhone { get; }
+
+            public string LastName { get; }
+
+            public DefinedValueCache MaritalStatus { get; }
+
+            public string MiddleName { get; }
+
+            public string MobilePhone { get; }
+
+            public string WorkPhone { get; }
+
+            public LavaHasAttributes Person { get; }
+
+            public LavaHasAttributes GroupMember { get; }
+
+            public LavaSignatureRegistrant( RegistrationRegistrant registrant )
+                : this( registrant.Person, null, null, registrant.GroupMember )
+            {
+                FirstName = registrant.FirstName;
+                LastName = registrant.LastName;
+                Email = registrant.Email;
+
+                Address = registrant.Person.GetHomeLocation();
+
+                var campus = registrant.Person.GetCampus();
+                if ( campus != null )
+                {
+                    Campus = CampusCache.Get( campus.Id );
+                }
+            }
+
+            public LavaSignatureRegistrant( Person person, Location homeLocation, CampusCache campus, GroupMember groupMember )
+            {
+                Address = homeLocation;
+                AnniversaryDate = person.AnniversaryDate;
+                BirthDate = person.BirthDate;
+                Campus = campus;
+                ConnectionStatus = person.ConnectionStatusValueId.HasValue ? DefinedValueCache.Get( person.ConnectionStatusValueId.Value ) : null;
+                Email = person.Email;
+                FirstName = person.FirstName;
+                Gender = person.Gender;
+                GradeFormatted = person.GradeFormatted;
+                GradeOffset = person.GradeOffset;
+                GraduationYear = person.GraduationYear;
+                HomePhone = person.GetPhoneNumber( SystemGuid.DefinedValue.PERSON_PHONE_TYPE_HOME.AsGuid() )?.NumberFormatted;
+                LastName = person.LastName;
+                MaritalStatus = person.MaritalStatusValueId.HasValue ? DefinedValueCache.Get( person.MaritalStatusValueId.Value ) : null;
+                MiddleName = person.MiddleName;
+                MobilePhone = person.GetPhoneNumber( SystemGuid.DefinedValue.PERSON_PHONE_TYPE_MOBILE.AsGuid() )?.NumberFormatted;
+                WorkPhone = person.GetPhoneNumber( SystemGuid.DefinedValue.PERSON_PHONE_TYPE_WORK.AsGuid() )?.NumberFormatted;
+
+                if ( person != null )
+                {
+                    if ( person.Attributes == null )
+                    {
+                        person.LoadAttributes();
+                    }
+
+                    Person = new LavaHasAttributes
+                    {
+                        Attributes = person.Attributes,
+                        AttributeValues = person.AttributeValues
+                    };
+                }
+
+                if ( groupMember != null )
+                {
+                    if ( groupMember.Attributes == null )
+                    {
+                        groupMember.LoadAttributes();
+                    }
+
+                    GroupMember = new LavaHasAttributes
+                    {
+                        Attributes = groupMember.Attributes,
+                        AttributeValues = groupMember.AttributeValues
+                    };
+                }
+            }
+        }
+
+        /// <summary>
+        /// Provides a custom object that has attributes that is used during
+        /// Lava merge for a signature document.
+        /// </summary>
+        private class LavaHasAttributes : Rock.Lava.LavaDataObject, IHasAttributes
+        {
+            #region IHasAttributes
+
+            int IHasAttributes.Id => 0;
+
+            public Dictionary<string, AttributeCache> Attributes { get; set; }
+
+            public Dictionary<string, AttributeValueCache> AttributeValues { get; set; }
+
+            public Dictionary<string, string> AttributeValueDefaults => throw new NotImplementedException();
+
+            public string GetAttributeValue( string key )
+            {
+                if ( AttributeValues != null &&
+                    AttributeValues.ContainsKey( key ) )
+                {
+                    return this.AttributeValues[key].Value;
+                }
+
+                if ( this.Attributes != null &&
+                    this.Attributes.ContainsKey( key ) )
+                {
+                    return this.Attributes[key].DefaultValue;
+                }
+
+                return null;
+            }
+
+            public List<string> GetAttributeValues( string key )
+            {
+                string value = GetAttributeValue( key );
+                if ( !string.IsNullOrWhiteSpace( value ) )
+                {
+                    return value.SplitDelimitedValues().ToList();
+                }
+
+                return new List<string>();
+            }
+
+            public void SetAttributeValue( string key, string value )
+            {
+                throw new NotImplementedException();
+            }
+
+            #endregion
+        }
+
+        /// <summary>
+        /// Internal structure for the encoded data that contains the signed document.
+        /// This is sent to the browser in encrypted form and then included in
+        /// the final submission process to be used to generate the actual document.
+        /// </summary>
+        private class SignedDocumentData
+        {
+            public string DocumentHtml { get; set; }
+
+            public string SignatureData { get; set; }
+
+            public string SignedByName { get; set; }
+
+            public string SignedByEmail { get; set; }
+
+            public string IpAddress { get; set; }
+
+            public string UserAgent { get; set; }
+
+            public DateTime SignedDateTime { get; set; }
+        }
+
+        #endregion
     }
 }
