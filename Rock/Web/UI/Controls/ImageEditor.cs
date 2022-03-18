@@ -754,8 +754,10 @@ namespace Rock.Web.UI.Controls
             }
 
             int[] photoCoords = _hfCropCoords.Value.Split( new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries ).Select( a => ( int ) a.AsDecimal() ).ToArray();
-            int x = photoCoords[0];
-            int y = photoCoords[1];
+
+            // If the crop square has gone outside the allowed range (into the negative), then set those coordinates to 0.
+            int x = photoCoords[0] < 0 ? 0 : photoCoords[0];
+            int y = photoCoords[1] < 0 ? 0 : photoCoords[1];
             int width = photoCoords[2];
             int height = photoCoords[3];
             int x2 = x + width;
