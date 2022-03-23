@@ -66,8 +66,7 @@ export default defineComponent({
             internalValue: {
                 lower: "",
                 upper: ""
-            },
-            validationValue: ""
+            }
         };
     },
 
