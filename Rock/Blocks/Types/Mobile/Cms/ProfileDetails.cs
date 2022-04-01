@@ -30,7 +30,6 @@ namespace Rock.Blocks.Types.Mobile.Cms
     /// Allows the user to edit their account on a mobile application.
     /// </summary>
     /// <seealso cref="Rock.Blocks.RockMobileBlockType" />
-
     [DisplayName( "Profile Details" )]
     [Category( "Mobile > Cms" )]
     [Description( "Allows the user to edit their account on a mobile application." )]
@@ -230,7 +229,6 @@ namespace Rock.Blocks.Types.Mobile.Cms
             /// The gender key.
             /// </summary>
             public const string Gender = "Gender";
-
         }
 
         #region Block Attributes
@@ -242,7 +240,6 @@ namespace Rock.Blocks.Types.Mobile.Cms
         /// The gender visibility.
         /// </value>
         public VisibilityTriState GenderVisibility => GetAttributeValue( AttributeKeys.Gender).ConvertToEnum<VisibilityTriState>();
-
 
         #endregion
 
@@ -405,12 +402,11 @@ namespace Rock.Blocks.Types.Mobile.Cms
                         }
 
                         // TODO: ???
-                        //familyAddress.IsMailingLocation = cbIsMailingAddress.Checked;
-                        //familyAddress.IsMappedLocation = cbIsPhysicalAddress.Checked;
-
+                        // familyAddress.IsMailingLocation = cbIsMailingAddress.Checked;
+                        // familyAddress.IsMappedLocation = cbIsPhysicalAddress.Checked;
                         familyAddress.Location = new LocationService( rockContext ).Get(
                             profile.HomeAddress.Street1,
-                            "",
+                            string.Empty,
                             profile.HomeAddress.City,
                             profile.HomeAddress.State,
                             profile.HomeAddress.PostalCode,
