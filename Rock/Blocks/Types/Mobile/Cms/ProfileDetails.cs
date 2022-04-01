@@ -19,6 +19,7 @@ using System.Linq;
 
 using Rock.Attribute;
 using Rock.Common.Mobile;
+using Rock.Common.Mobile.Enums;
 using Rock.Mobile;
 using Rock.Model;
 using Rock.Web.Cache;
@@ -147,6 +148,17 @@ namespace Rock.Blocks.Types.Mobile.Cms
         Category = "custommobile",
         Order = 9 )]
 
+    [EnumField( "Gender",
+        Description = "Determines if the Gender field should be hidden, optional or required.",
+        EnumSourceType = typeof( VisibilityTriState ),
+        IsRequired = true,
+        DefaultEnumValue = ( int ) VisibilityTriState.Optional,
+        Category = "custommobile",
+        Key = AttributeKeys.Gender,
+        Order = 10 )]
+
+
+
     #endregion
 
     public class ProfileDetails: RockMobileBlockType
@@ -215,7 +227,26 @@ namespace Rock.Blocks.Types.Mobile.Cms
             /// The address required key
             /// </summary>
             public const string AddressRequired = "AddressRequired";
+
+            /// <summary>
+            /// The gender key.
+            /// </summary>
+            public const string Gender = "Gender";
+
         }
+
+        #region Block Attributes
+
+        /// <summary>
+        /// Gets the gender visibility.
+        /// </summary>
+        /// <value>
+        /// The gender visibility.
+        /// </value>
+        public VisibilityTriState GenderVisibility => GetAttributeValue( AttributeKeys.Gender).ConvertToEnum<VisibilityTriState>();
+
+
+        #endregion
 
         #region IRockMobileBlockType Implementation
 
@@ -277,7 +308,13 @@ namespace Rock.Blocks.Types.Mobile.Cms
             person.NickName = person.NickName == person.FirstName ? profile.FirstName : person.NickName;
             person.FirstName = profile.FirstName;
             person.LastName = profile.LastName;
-            person.Gender = ( Gender ) profile.Gender;
+
+            var gender = ( Model.Gender ) profile.Gender;
+
+            if ( GenderVisibility != VisibilityTriState.Hidden)
+            {
+                person.Gender = gender;
+            }
 
             if ( GetAttributeValue( AttributeKeys.BirthDateShow ).AsBoolean() )
             {
