@@ -157,8 +157,6 @@ namespace Rock.Blocks.Types.Mobile.Cms
         Key = AttributeKeys.Gender,
         Order = 10 )]
 
-
-
     #endregion
 
     public class ProfileDetails: RockMobileBlockType
