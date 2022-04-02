@@ -12,6 +12,10 @@
         <Rock:AccountPicker ID="apAccountMulti" runat="server" EnhanceForLongLists="true" DisplayChildItemCountLabel="true" AllowMultiSelect="true"  DisplayActiveOnly="false" />
         <br />
 
+     <%--   <h1>Account Picker</h1>
+        <Rock:AccountPicker ID="apAccount" runat="server" EnhanceForLongLists="true" DisplayChildItemCountLabel="true" AllowMultiSelect="false"  DisplayActiveOnly="false" />
+        <br />--%>
+
          <h1>Category Picker (Multi Select)</h1>
         <Rock:CategoryPicker ID="catPickerMulti" runat="server" EnhanceForLongLists="true" DisplayChildItemCountLabel="true" AllowMultiSelect="true"  DisplayActiveOnly="false"  />
         <br />
